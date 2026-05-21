@@ -1,0 +1,7 @@
+profiles:
+  default:
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - MIDI Library (5.0.2)
+default_profile: default
