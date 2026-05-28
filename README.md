@@ -2,7 +2,7 @@
 
 **Arduino UNO Q × KORG volca modular — 観客参加型 AI自律パッチングシンセサイザー**
 
-ローカルLLM + キーワードプリセットにより、自然言語でvolca modularのパッチングを制御する完全オフラインのライブパフォーマンスシステム。同一LAN上のお客さんのスマホからプロンプトを送信でき、キュー制で順番にパッチが適用される。
+ローカルLM + キーワードプリセットにより、自然言語でvolca modularのパッチングを制御する完全オフラインのライブパフォーマンスシステム。同一LAN上のお客さんのスマホからプロンプトを送信でき、キュー制で順番にパッチが適用される。
 
 ---
 
@@ -12,7 +12,7 @@
 
 | モード | 入力 | 処理 |
 |---|---|---|
-| **マニュアル（キュー）** | 観客がWeb UIからテキスト入力 | キューに追加 → 順番にLLM/プリセットで6パラメータ生成 → CV出力 |
+| **マニュアル（キュー）** | 観客がWeb UIからテキスト入力 | キューに追加 → 順番にLM/プリセットで6パラメータ生成 → CV出力 |
 | **マニュアル（管理者）** | 管理者がSettings画面から即時入力 | キューをスキップして即座にCV出力 |
 | **オート** | MIDIキーボード演奏 | MCU上のStateEngineが演奏を解析 → 自律的にCV出力 |
 
@@ -65,7 +65,7 @@ GND ──── GND ──── GND ─── GND
 sample/
 ├── app.yaml                  # App Lab アプリ設定（ポート8080開放）
 ├── python/
-│   ├── main.py               # LLMエンジン + キューシステム + Web UI
+│   ├── main.py               # LMエンジン + キューシステム + Web UI
 │   └── requirements.txt      # llama-cpp-python
 └── sketch/
     ├── sketch.ino            # メインスケッチ（Bridge + MIDI + CV制御）
@@ -80,11 +80,11 @@ sample/
 
 ```
 [観客のスマホ]                [Linux MPU]                     [MCU (Zephyr)]
-                             ┌─────────────────────┐  Bridge  ┌──────────────┐
- ブラウザ ──HTTP──→ Web UI   │  main.py            │ ──RPC──→ │ sketch.ino   │
+                             ┌─────────────────────┐   Bridge  ┌──────────────┐
+ ブラウザ ──HTTP──→ Web UI    │  main.py             │ ──RPC──→ │ sketch.ino   │
                   (:8080)    │  ├─ Queue System     │          │ ├─ CvOutput  │
                              │  ├─ Cooldown / Admin │          │ ├─ StateEng  │
-                             │  ├─ Local LLM        │          │ └─ MIDI解析  │
+                             │  ├─ Local LM         │          │ └─ MIDI解析  │
                              │  └─ Preset Fallback  │          └──────┬───────┘
                              └─────────────────────┘                  ↓
                                                               volca modular (CV)
@@ -179,11 +179,11 @@ wget -O /home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf \
 
 ## 音の生成ロジック
 
-### LLM（メイン）
-ローカルLLM（SmolLM2-360M, Q4量子化）がプロンプトから6つの数値を生成。
+### SLM（メイン）
+ローカルSLM（SmolLM2-360M, Q4量子化）がプロンプトから6つの数値を生成。
 
 ### プリセット（フォールバック）
-LLMのパースに失敗した場合、キーワードマッチで即座にフォールバック。
+SLMのパースに失敗した場合、キーワードマッチで即座にフォールバック。
 
 | カテゴリ | キーワード |
 |---|---|
@@ -208,7 +208,7 @@ LLMのパースに失敗した場合、キーワードマッチで即座にフ�
 | `ADMIN_PASSWORD` | `vibeadmin` | 管理者パスワード |
 | `COOLDOWN_SECONDS` | `60` | 同一IPのクールダウン秒数 |
 | `QUEUE_INTERVAL` | `20` | キューから次のパッチを適用する間隔（秒） |
-| `MODEL_PATH` | `/home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf` | LLMモデルのパス |
+| `MODEL_PATH` | `/home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf` | LMモデルのパス |
 
 ---
 
