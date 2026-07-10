@@ -4,6 +4,8 @@ import urllib.parse
 import re
 import random
 import os
+import uuid
+import http.cookies
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from arduino.app_utils import App, Bridge
 
@@ -598,12 +600,53 @@ class UIHandler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length)) if length else {}
 
     def _client_ip(self):
+        # Cloudflare Tunnel / リバースプロキシ経由だと self.client_address[0] は
+        # 常に 127.0.0.1（cloudflared自身）になり、全観客が同一IP扱いになってしまう。
+        # Cloudflare は本当のアクセス元を CF-Connecting-IP で渡してくれるのでそれを優先。
+        cf_ip = self.headers.get('CF-Connecting-IP')
+        if cf_ip:
+            return cf_ip.strip()
+        # 一般的なプロキシ用フォールバック（先頭が本来のクライアント）
+        xff = self.headers.get('X-Forwarded-For')
+        if xff:
+            return xff.split(',')[0].strip()
         return self.client_address[0]
+
+    def _cookie_id(self):
+        """リクエストのCookieから vibe_id を取り出す。無ければ None。"""
+        cookie_header = self.headers.get('Cookie')
+        if not cookie_header:
+            return None
+        try:
+            c = http.cookies.SimpleCookie()
+            c.load(cookie_header)
+            if 'vibe_id' in c:
+                return c['vibe_id'].value
+        except Exception:
+            pass
+        return None
+
+    def _client_id(self):
+        # クールダウン判定に使う「観客の識別子」。
+        # ブラウザ単位で発行したCookie(vibe_id)を最優先し、スマホ1台=1人として厳密にカウント。
+        # キャリアNATや会場Wi-Fiで複数人が同一IPに見えても混ざらない。
+        # Cookieが無い環境（古いブラウザ/直叩き等）だけIPにフォールバック。
+        cid = self._cookie_id()
+        if cid:
+            return "cid:" + cid
+        return "ip:" + self._client_ip()
 
     def do_GET(self):
         if self.path == '/':
             self.send_response(200)
             self.send_header('Content-type', 'text/html; charset=utf-8')
+            # ブラウザ単位の識別子を初回アクセス時に付与（クールダウンをスマホ1台ごとに効かせる）
+            if not self._cookie_id():
+                token = uuid.uuid4().hex
+                self.send_header(
+                    'Set-Cookie',
+                    f'vibe_id={token}; Path=/; Max-Age=86400; SameSite=Lax'
+                )
             self.end_headers()
             self.wfile.write(HTML_PAGE.encode('utf-8'))
         elif self.path == '/api/queue':
@@ -632,7 +675,7 @@ class UIHandler(BaseHTTPRequestHandler):
             if not prompt:
                 self._send_json({"ok": False, "error": "Empty prompt"}, 400)
                 return
-            result = add_to_queue(prompt, self._client_ip())
+            result = add_to_queue(prompt, self._client_id())
             result["cooldown"] = COOLDOWN_SECONDS
             self._send_json(result)
 

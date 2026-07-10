@@ -2,7 +2,7 @@
 
 **Arduino UNO Q × KORG volca modular — 観客参加型 AI自律パッチングシンセサイザー**
 
-ローカルLM + キーワードプリセットにより、自然言語でvolca modularのパッチングを制御する完全オフラインのライブパフォーマンスシステム。同一LAN上のお客さんのスマホからプロンプトを送信でき、キュー制で順番にパッチが適用される。
+ローカルLLM + キーワードプリセットにより、自然言語でvolca modularのパッチングを制御する完全オフラインのライブパフォーマンスシステム。同一LAN上のお客さんのスマホからプロンプトを送信でき、キュー制で順番にパッチが適用される。
 
 ---
 
@@ -12,7 +12,7 @@
 
 | モード | 入力 | 処理 |
 |---|---|---|
-| **マニュアル（キュー）** | 観客がWeb UIからテキスト入力 | キューに追加 → 順番にLM/プリセットで6パラメータ生成 → CV出力 |
+| **マニュアル（キュー）** | 観客がWeb UIからテキスト入力 | キューに追加 → 順番にLLM/プリセットで6パラメータ生成 → CV出力 |
 | **マニュアル（管理者）** | 管理者がSettings画面から即時入力 | キューをスキップして即座にCV出力 |
 | **オート** | MIDIキーボード演奏 | MCU上のStateEngineが演奏を解析 → 自律的にCV出力 |
 
@@ -65,7 +65,7 @@ GND ──── GND ──── GND ─── GND
 sample/
 ├── app.yaml                  # App Lab アプリ設定（ポート8080開放）
 ├── python/
-│   ├── main.py               # LMエンジン + キューシステム + Web UI
+│   ├── main.py               # LLMエンジン + キューシステム + Web UI
 │   └── requirements.txt      # llama-cpp-python
 └── sketch/
     ├── sketch.ino            # メインスケッチ（Bridge + MIDI + CV制御）
@@ -80,11 +80,11 @@ sample/
 
 ```
 [観客のスマホ]                [Linux MPU]                     [MCU (Zephyr)]
-                             ┌─────────────────────┐   Bridge  ┌──────────────┐
- ブラウザ ──HTTP──→ Web UI    │  main.py             │ ──RPC──→ │ sketch.ino   │
+                             ┌─────────────────────┐  Bridge  ┌──────────────┐
+ ブラウザ ──HTTP──→ Web UI   │  main.py            │ ──RPC──→ │ sketch.ino   │
                   (:8080)    │  ├─ Queue System     │          │ ├─ CvOutput  │
                              │  ├─ Cooldown / Admin │          │ ├─ StateEng  │
-                             │  ├─ Local LM         │          │ └─ MIDI解析  │
+                             │  ├─ Local LLM        │          │ └─ MIDI解析  │
                              │  └─ Preset Fallback  │          └──────┬───────┘
                              └─────────────────────┘                  ↓
                                                               volca modular (CV)
@@ -121,7 +121,57 @@ wget -O /home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf \
 
 ### 3. Web UIにアクセス
 
-ブラウザで `http://arduino.local:8080` を開く。
+**ローカルLAN内から:**
+ブラウザで `http://arduino.local:8080`（または `http://<YOUR_BOARD_IP>:8080`）を開く。
+
+**外部（独自ドメイン）から:**
+Cloudflare Tunnel 経由で `https://vibe-patching.ocha-no-taiko.com` を開く。
+セットアップ手順は下記「[リモートアクセス（Cloudflare Tunnel）](#リモートアクセスcloudflare-tunnel)」を参照。
+
+---
+
+## リモートアクセス（Cloudflare Tunnel）
+
+会場のWi-Fiに観客を接続させる代わりに、独自ドメインから直接アクセスできるようにする構成。
+**ポート開放・固定IP・動的DNSは不要**。Arduino側からCloudflareへアウトバウンド専用の接続を張るため、ルーター設定を触らずに公開できる。
+
+```
+[観客のスマホ] ──HTTPS──→ vibe-patching.ocha-no-taiko.com
+                              │ (Cloudflare edge)
+                              ↓ Tunnel（アウトバウンド接続）
+                      [UNO Q] cloudflared ──→ http://localhost:8080 （main.py）
+```
+
+### セットアップ手順
+
+1. **トンネル作成**: Cloudflareダッシュボード → Zero Trust → ネットワーク → Tunnels で、名前 `vibe-patching` のトンネルを作成。
+2. **UNO Q に cloudflared を導入**: 表示された接続コマンドに従い、UNO Q（Debian / arm64）で cloudflared をインストールし、サービスとして登録・接続する。
+
+   ```bash
+   sudo cloudflared service install <CONNECTOR_TOKEN>
+   ```
+
+   ⚠️ `<CONNECTOR_TOKEN>` はアカウント連携用の**機密情報**。ターミナル出力やコマンド全文をそのまま共有・コミット・チャット貼付しないこと。
+3. **公開ルートを追加**: トンネル詳細 → 「ルートを追加」→「公開アプリケーション」で、
+   ホスト名 `vibe-patching.ocha-no-taiko.com` を サービスURL `http://localhost:8080` に紐づける。
+   これで DNS の CNAME レコードが自動生成される（`vibe-patching.ocha-no-taiko.com` → `<TUNNEL_ID>.cfargotunnel.com`）。
+4. **動作確認**: ブラウザで `https://vibe-patching.ocha-no-taiko.com` を開き、Web UI が表示されればOK。
+
+### トークンを再発行する場合
+
+トークンが漏れた/ローテートしたときは、**必ず UNO Q 側で先にアンインストールしてから**新トークンで入れ直す。
+
+```bash
+sudo cloudflared service uninstall
+sudo cloudflared service install <NEW_CONNECTOR_TOKEN>
+```
+
+### ⚠️ Tunnel化に伴うクールダウンの注意（v1.2.1で対応済み）
+
+Tunnel経由だと、Python側から見たアクセス元IPは全観客が `127.0.0.1`（cloudflared自身）になる。
+そのため **IPベースのクールダウンだと全端末で共有されてしまい、最初の1人以降が全員ブロックされる**。
+v1.2.1 では判定基準を **IPからブラウザ単位のCookie（`vibe_id`）** に変更してこれを解消済み。
+詳細は「[クールダウンの仕組み](#クールダウンの仕組み)」を参照。
 
 ---
 
@@ -131,7 +181,7 @@ wget -O /home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf \
 
 プロンプトを入力して **Submit to Queue** を押すと、キューに追加される。
 
-- 送信後 **60秒間クールダウン**（プログレスバーで残り時間を表示）
+- 送信後 **60秒間クールダウン**（プログレスバーで残り時間を表示）※ブラウザ（スマホ1台）ごとに個別に効く（→[クールダウンの仕組み](#クールダウンの仕組み)）
 - 6つのメトリクスカード（PITCH / FOLD / MOD / WOGGLE / LPG / SPACE OUT）に現在値を表示
 - **MIDI Auto** ボタンでオートモードに切り替え
 
@@ -162,7 +212,9 @@ wget -O /home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf \
 1. ライブ開始前
    - UNO Qとvolca modularをパッチケーブルで接続
    - App Labからアプリを起動
-   - 会場のWi-Fi情報とアクセスURL（例: http://192.168.1.34:8080）を観客に共有
+   - アクセスURLを観客に共有
+     - ローカル運用: 会場のWi-Fi情報 + `http://192.168.1.34:8080` 等
+     - リモート運用: `https://vibe-patching.ocha-no-taiko.com`（Cloudflare Tunnel経由、Wi-Fi接続不要）
 
 2. ライブ中
    観客A → "ドローン" を送信 → キュー#1（20秒後に適用 🔊）
@@ -179,11 +231,11 @@ wget -O /home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf \
 
 ## 音の生成ロジック
 
-### SLM（メイン）
-ローカルSLM（SmolLM2-360M, Q4量子化）がプロンプトから6つの数値を生成。
+### LLM（メイン）
+ローカルLLM（SmolLM2-360M, Q4量子化）がプロンプトから6つの数値を生成。
 
 ### プリセット（フォールバック）
-SLMのパースに失敗した場合、キーワードマッチで即座にフォールバック。
+LLMのパースに失敗した場合、キーワードマッチで即座にフォールバック。
 
 | カテゴリ | キーワード |
 |---|---|
@@ -206,9 +258,32 @@ SLMのパースに失敗した場合、キーワードマッチで即座にフ�
 | 変数 | デフォルト | 説明 |
 |---|---|---|
 | `ADMIN_PASSWORD` | `vibeadmin` | 管理者パスワード |
-| `COOLDOWN_SECONDS` | `60` | 同一IPのクールダウン秒数 |
+| `COOLDOWN_SECONDS` | `60` | 1ブラウザあたりのクールダウン秒数 |
 | `QUEUE_INTERVAL` | `20` | キューから次のパッチを適用する間隔（秒） |
-| `MODEL_PATH` | `/home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf` | LMモデルのパス |
+| `MODEL_PATH` | `/home/arduino/models/smollm2-360m-instruct.Q4_K_M.gguf` | LLMモデルのパス |
+
+---
+
+## クールダウンの仕組み
+
+「N秒ごとに1人1回」の連投防止を、**ブラウザ単位**で判定する。
+
+- 初回アクセス時にランダムなトークンを Cookie（`vibe_id`, 24時間有効）としてブラウザに発行。
+- 送信時はこの Cookie を識別子として `COOLDOWN_SECONDS` のクールダウンを適用する。
+- Cookie が無い環境（直叩き等）のみ、アクセス元IPにフォールバック。
+
+### なぜIPではなくCookieなのか
+
+| 方式 | LAN直アクセス | Cloudflare Tunnel経由 |
+|---|---|---|
+| IPベース（v1.2.0以前） | スマホごとに別IP＝正常 | **全員 `127.0.0.1` 扱い → 最初の1人以降が全ブロック** |
+| Cookieベース（v1.2.1〜） | スマホ1台=1人 ✅ | スマホ1台=1人 ✅（NAT/Tunnelの影響を受けない） |
+
+キャリアの4G/5G（キャリアNAT）や会場Wi-Fiでは複数人が同一IPに見えるため、IP方式だと別人が巻き込まれてブロックされる。Cookie方式はこれを回避する。
+
+### 制限（回避可能性）
+
+Cookie方式は、**シークレットモード・Cookie削除・別ブラウザ**で送り直せば回避できる。ライブの公平性としては十分だが、「完全に1人1回・回避不可」を求める場合は入場時に配る一意コード（QR等）を必須にする方式が別途必要。
 
 ---
 

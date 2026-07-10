@@ -1,6 +1,6 @@
-name: †Vibe-Patching†
-description: ""
+name: †Vibe-Patching† v1.2.1 (PW update)
+description: Arduino UNO Q × KORG volca modular — 観客参加型 AI自律パッチングシンセサイザー
 ports:
-  - 8080
+- 8080
 bricks: []
-icon: 😀
+icon: 🪡
