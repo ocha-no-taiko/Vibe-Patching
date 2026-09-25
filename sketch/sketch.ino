@@ -3,6 +3,7 @@
 #include "StateEngine.h"
 #include "CvOutput.h"
 #include "MidiHandler.h"
+#include "SyncOutput.h"
 #include "Arduino_RouterBridge.h"
 
 // 各モジュールのインスタンス生成
@@ -19,6 +20,14 @@ const int PIN_CV_LPG      = 10;
 const int PIN_CV_SPACEOUT = 11;
 
 CvOutput cvOutput(PIN_CV_PITCH, PIN_CV_FOLD, PIN_CV_MOD, PIN_CV_WOGGLE, PIN_CV_LPG, PIN_CV_SPACEOUT);
+
+// volca modular の SYNC IN へのクロックパルス出力
+const int PIN_SYNC_OUT = 2;
+SyncOutput syncOutput(PIN_SYNC_OUT);
+
+// RPCスレッドからはフラグだけ立て、Serial出力は loop() 側で行う
+enum SyncConfigStatus { SYNC_CFG_NONE, SYNC_CFG_OK, SYNC_CFG_INVALID };
+volatile int syncConfigStatus = SYNC_CFG_NONE;
 
 unsigned long lastDebugPrint = 0;
 
@@ -50,6 +59,17 @@ void enable_auto_mode(String msg) {
     Serial.println("Auto Mode Enabled!");
 }
 
+// 形式: "enabled,CALM,RITUAL,PANIC,BROKEN"（例: "1,80,120,170,140"）
+void set_sync_config(String params) {
+    int en, calm, ritual, panic, broken;
+    if (sscanf(params.c_str(), "%d,%d,%d,%d,%d", &en, &calm, &ritual, &panic, &broken) == 5) {
+        syncOutput.setConfig(en != 0, calm, ritual, panic, broken);
+        syncConfigStatus = SYNC_CFG_OK;
+    } else {
+        syncConfigStatus = SYNC_CFG_INVALID;
+    }
+}
+
 void setup() {
     // USB経由のシリアルモニタ出力用
     Serial.begin(115200);
@@ -59,12 +79,14 @@ void setup() {
     
     // システムの初期化
     cvOutput.begin();
+    syncOutput.begin();
     midiHandler.begin(); // これによりSerial1(MIDI受信用)も初期化される
     
     // Bridge (App Lab Pythonとの通信) 初期化
     Bridge.begin();
     Bridge.provide("apply_manual_patch", apply_manual_patch);
     Bridge.provide("enable_auto_mode", enable_auto_mode);
+    Bridge.provide("set_sync_config", set_sync_config);
     
     Serial.println("Initialization complete. Listening for MIDI on RX pin...");
 }
@@ -79,7 +101,27 @@ void loop() {
     
     // 2. AIによる状態（人格）の推論
     stateEngine.update(featureExtractor);
-    
+
+    // 2.5 状態に応じたテンポで SYNC パルスを出力（パルス幅の精度のため最新の時刻を使う）
+    syncOutput.update(stateEngine.getCurrentState(), millis());
+    if (syncConfigStatus != SYNC_CFG_NONE) {
+        if (syncConfigStatus == SYNC_CFG_OK) {
+            Serial.print("Sync config applied: ");
+            Serial.print(syncOutput.isEnabled() ? "ON" : "OFF");
+            Serial.print(" | BPM CALM=");
+            Serial.print(syncOutput.getBpm(STATE_CALM));
+            Serial.print(" RITUAL=");
+            Serial.print(syncOutput.getBpm(STATE_RITUAL));
+            Serial.print(" PANIC=");
+            Serial.print(syncOutput.getBpm(STATE_PANIC));
+            Serial.print(" BROKEN=");
+            Serial.println(syncOutput.getBpm(STATE_BROKEN));
+        } else {
+            Serial.println("Invalid sync config format. Expected: 'enabled,CALM,RITUAL,PANIC,BROKEN'");
+        }
+        syncConfigStatus = SYNC_CFG_NONE;
+    }
+
     // 3. 現在の状態と特徴に基づくCV（PWM）の生成・出力
     cvOutput.update(stateEngine, featureExtractor);
     
@@ -92,7 +134,14 @@ void loop() {
         Serial.print(" | Avg Vel: ");
         Serial.print(featureExtractor.getVelocityAverage());
         Serial.print(" | KickHeavy: ");
-        Serial.println(featureExtractor.isKickHeavy() ? "YES" : "NO");
+        Serial.print(featureExtractor.isKickHeavy() ? "YES" : "NO");
+        Serial.print(" | Sync: ");
+        if (syncOutput.isEnabled()) {
+            Serial.print(syncOutput.getBpm(stateEngine.getCurrentState()));
+            Serial.println(" BPM");
+        } else {
+            Serial.println("OFF");
+        }
         
         lastDebugPrint = now;
     }

@@ -312,6 +312,56 @@ def get_queue_state():
     }
 
 
+# ============================================================
+# SYNC クロック設定（D2 → volca modular SYNC IN）
+# ============================================================
+SYNC_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_config.json")
+SYNC_STATES = ["CALM", "RITUAL", "PANIC", "BROKEN"]
+DEFAULT_SYNC_BPM = {"CALM": 80, "RITUAL": 120, "PANIC": 170, "BROKEN": 140}
+
+
+def load_sync_params():
+    """sync_config.json を読み、MCUの set_sync_config 用の文字列にする。
+    読めない値は初期値で補う（範囲 20〜300 への丸めはMCU側でも行う）。"""
+    try:
+        with open(SYNC_CONFIG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception as e:
+        print(f"[Sync] Failed to load {SYNC_CONFIG_PATH}: {e}. Using defaults.")
+        cfg = {}
+    bpm = cfg.get("bpm", {}) if isinstance(cfg.get("bpm"), dict) else {}
+    values = []
+    for s in SYNC_STATES:
+        try:
+            values.append(max(20, min(300, int(bpm.get(s, DEFAULT_SYNC_BPM[s])))))
+        except (TypeError, ValueError):
+            values.append(DEFAULT_SYNC_BPM[s])
+    enabled = 1 if cfg.get("enabled", True) else 0
+    return f"{enabled}," + ",".join(map(str, values))
+
+
+def sync_config_sender():
+    """起動時と sync_config.json の更新時に、SYNC設定をMCUへ送る。
+    MCUは起動後しばらく Bridge の登録が終わらず呼び出しが失敗するので、成功するまで再送する。"""
+    sent_mtime = "unsent"
+    while True:
+        try:
+            mtime = os.path.getmtime(SYNC_CONFIG_PATH)
+        except OSError:
+            mtime = None
+        if mtime != sent_mtime:
+            params = load_sync_params()
+            try:
+                Bridge.call("set_sync_config", params)
+                sent_mtime = mtime
+                print(f"[Sync] Config sent to MCU: {params}")
+            except Exception as e:
+                print(f"[Sync] MCU not ready ({e}). Retrying...")
+        time.sleep(2)
+
+threading.Thread(target=sync_config_sender, daemon=True).start()
+
+
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="ja" class="dark">

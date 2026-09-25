@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "bpm": {
+    "CALM": 80,
+    "RITUAL": 120,
+    "PANIC": 170,
+    "BROKEN": 140
+  }
+}
