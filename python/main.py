@@ -5,6 +5,7 @@ import re
 import random
 import os
 import uuid
+import html
 import http.cookies
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from arduino.app_utils import App, Bridge
@@ -368,12 +369,12 @@ HTML_PAGE = """
                     <input type="text" id="promptInput" class="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 vt text-white placeholder:text-zinc-600" placeholder="How should it sound?">
                 </div>
                 <div class="grid grid-cols-3 gap-3 mt-4">
-                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">PITCH</span><span id="val-pitch" class="text-lg font-medium">Auto</span></div>
-                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">FOLD</span><span id="val-fold" class="text-lg font-medium">Auto</span></div>
-                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">MOD</span><span id="val-mod" class="text-lg font-medium">Auto</span></div>
-                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">WOGGLE</span><span id="val-woggle" class="text-lg font-medium">Auto</span></div>
-                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">LPG</span><span id="val-lpg" class="text-lg font-medium">Auto</span></div>
-                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">SPACE OUT</span><span id="val-spaceout" class="text-lg font-medium">Auto</span></div>
+                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">__CV_LABEL_0__</span><span id="val-pitch" class="text-lg font-medium">Auto</span></div>
+                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">__CV_LABEL_1__</span><span id="val-fold" class="text-lg font-medium">Auto</span></div>
+                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">__CV_LABEL_2__</span><span id="val-mod" class="text-lg font-medium">Auto</span></div>
+                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">__CV_LABEL_3__</span><span id="val-woggle" class="text-lg font-medium">Auto</span></div>
+                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">__CV_LABEL_4__</span><span id="val-lpg" class="text-lg font-medium">Auto</span></div>
+                    <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">__CV_LABEL_5__</span><span id="val-spaceout" class="text-lg font-medium">Auto</span></div>
                 </div>
                 <div class="flex gap-3 mt-4">
                     <button onclick="submitToQueue()" id="btn-submit" class="flex-1 bg-white text-black hover:bg-gray-200 font-medium py-2.5 px-4 rounded-xl vt shadow-[0_0_20px_rgba(255,255,255,0.1)]">Submit to Queue</button>
@@ -588,6 +589,29 @@ setInterval(refreshQueue, 2000); // 2秒ごとに自動更新
 """
 
 
+UI_LABELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_labels.json")
+DEFAULT_CV_LABELS = ["CV1", "CV2", "CV3", "CV4", "CV5", "CV6"]
+
+
+def load_cv_labels():
+    """ui_labels.json からメトリクスカードの表示名を読む。
+    ページ表示のたびに読むので、JSONを書き換えればアプリ再起動なしで反映される。"""
+    try:
+        with open(UI_LABELS_PATH, encoding="utf-8") as f:
+            labels = json.load(f).get("cv_labels", [])
+    except Exception as e:
+        print(f"[UI] Failed to load {UI_LABELS_PATH}: {e}. Using defaults.")
+        return DEFAULT_CV_LABELS
+    return [str(labels[i]) if i < len(labels) else DEFAULT_CV_LABELS[i] for i in range(6)]
+
+
+def render_html():
+    page = HTML_PAGE
+    for i, label in enumerate(load_cv_labels()):
+        page = page.replace(f"__CV_LABEL_{i}__", html.escape(label))
+    return page
+
+
 class UIHandler(BaseHTTPRequestHandler):
     def _send_json(self, data, code=200):
         self.send_response(code)
@@ -648,7 +672,7 @@ class UIHandler(BaseHTTPRequestHandler):
                     f'vibe_id={token}; Path=/; Max-Age=86400; SameSite=Lax'
                 )
             self.end_headers()
-            self.wfile.write(HTML_PAGE.encode('utf-8'))
+            self.wfile.write(render_html().encode('utf-8'))
         elif self.path == '/api/queue':
             self._send_json(get_queue_state())
         elif self.path.startswith('/auto'):

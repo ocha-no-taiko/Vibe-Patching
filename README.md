@@ -32,12 +32,12 @@
 ```
 Arduino UNO Q                    volca modular
 ─────────────                    ──────────────
-D3  (PWM) ─────────────────────→ PITCH
-D5  (PWM) ─────────────────────→ FOLD
-D6  (PWM) ─────────────────────→ MOD
-D9  (PWM) ─────────────────────→ WOGGLE
-D10 (PWM) ─────────────────────→ LPG
-D11 (PWM) ─────────────────────→ SPACE OUT
+D3  (PWM) ── CV1 ───────────────→ PITCH
+D5  (PWM) ── CV2 ───────────────→ FOLD
+D6  (PWM) ── CV3 ───────────────→ MOD
+D9  (PWM) ── CV4 ───────────────→ WOGGLE
+D10 (PWM) ── CV5 ───────────────→ LPG
+D11 (PWM) ── CV6 ───────────────→ SPACE OUT
 
 Serial RX ←──────────────────── MIDI OUT (キーボード)
 ```
@@ -66,6 +66,7 @@ sample/
 ├── app.yaml                  # App Lab アプリ設定（ポート8080開放）
 ├── python/
 │   ├── main.py               # LLMエンジン + キューシステム + Web UI
+│   ├── ui_labels.json        # Web UIのメトリクスカード表示名（CV1〜CV6）
 │   └── requirements.txt      # llama-cpp-python
 └── sketch/
     ├── sketch.ino            # メインスケッチ（Bridge + MIDI + CV制御）
@@ -182,7 +183,9 @@ v1.2.1 では判定基準を **IPからブラウザ単位のCookie（`vibe_id`�
 プロンプトを入力して **Submit to Queue** を押すと、キューに追加される。
 
 - 送信後 **60秒間クールダウン**（プログレスバーで残り時間を表示）※ブラウザ（スマホ1台）ごとに個別に効く（→[クールダウンの仕組み](#クールダウンの仕組み)）
-- 6つのメトリクスカード（PITCH / FOLD / MOD / WOGGLE / LPG / SPACE OUT）に現在値を表示
+- 6つのメトリクスカード（CV1〜CV6）に現在値を表示
+  - 表示名は `python/ui_labels.json` の `cv_labels` で変更可能（ページ再読み込みで反映、アプリ再起動は不要）
+  - CV番号とピンの対応は「[ピン接続](#ピン接続)」を参照
 - **MIDI Auto** ボタンでオートモードに切り替え
 
 ### Sequencer（キュー表示）
