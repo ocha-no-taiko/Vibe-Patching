@@ -2,17 +2,17 @@
 #define SYNC_OUTPUT_H
 
 #include <Arduino.h>
-#include "StateEngine.h"
 
 // volca の SYNC IN 用クロック出力。1パルス = シーケンサー1ステップ（16分音符）。
-// テンポはAIステートごとのBPMで決まり、BROKEN のときだけ不規則になる。
+// BPM は Web UI の管理者画面から設定される。
 class SyncOutput {
 public:
     SyncOutput(int pin);
     void begin();
-    void update(AIState state, unsigned long now);
-    void setConfig(bool enabled, int bpmCalm, int bpmRitual, int bpmPanic, int bpmBroken);
-    int getBpm(AIState state) const;
+    void update(unsigned long now);
+    // 値が変わったときだけ true を返す
+    bool setConfig(bool enabled, int bpm);
+    int getBpm() const;
     bool isEnabled() const;
 
 private:
@@ -27,15 +27,11 @@ private:
     int pin;
     // Bridge の RPC スレッドから書き換えられる
     volatile bool enabled;
-    volatile int bpm[4];
+    volatile int bpm;
 
     bool pulseHigh;
     unsigned long pulseStartAt;
     unsigned long lastStepAt;
-    unsigned long brokenIntervalMs;
-
-    unsigned long stepMs(AIState state) const;
-    void firePulse(unsigned long now);
 };
 
 #endif

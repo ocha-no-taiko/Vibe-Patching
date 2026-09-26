@@ -59,12 +59,14 @@ void enable_auto_mode(String msg) {
     Serial.println("Auto Mode Enabled!");
 }
 
-// 形式: "enabled,CALM,RITUAL,PANIC,BROKEN"（例: "1,80,120,170,140"）
+// 形式: "enabled,bpm"（例: "1,120"）
+// Python は定期的に同じ設定を送り直すので、変わったときだけログを出す
 void set_sync_config(String params) {
-    int en, calm, ritual, panic, broken;
-    if (sscanf(params.c_str(), "%d,%d,%d,%d,%d", &en, &calm, &ritual, &panic, &broken) == 5) {
-        syncOutput.setConfig(en != 0, calm, ritual, panic, broken);
-        syncConfigStatus = SYNC_CFG_OK;
+    int en, bpm;
+    if (sscanf(params.c_str(), "%d,%d", &en, &bpm) == 2) {
+        if (syncOutput.setConfig(en != 0, bpm)) {
+            syncConfigStatus = SYNC_CFG_OK;
+        }
     } else {
         syncConfigStatus = SYNC_CFG_INVALID;
     }
@@ -102,22 +104,16 @@ void loop() {
     // 2. AIによる状態（人格）の推論
     stateEngine.update(featureExtractor);
 
-    // 2.5 状態に応じたテンポで SYNC パルスを出力（パルス幅の精度のため最新の時刻を使う）
-    syncOutput.update(stateEngine.getCurrentState(), millis());
+    // 2.5 管理者画面で設定したBPMで SYNC パルスを出力（パルス幅の精度のため最新の時刻を使う）
+    syncOutput.update(millis());
     if (syncConfigStatus != SYNC_CFG_NONE) {
         if (syncConfigStatus == SYNC_CFG_OK) {
             Serial.print("Sync config applied: ");
             Serial.print(syncOutput.isEnabled() ? "ON" : "OFF");
-            Serial.print(" | BPM CALM=");
-            Serial.print(syncOutput.getBpm(STATE_CALM));
-            Serial.print(" RITUAL=");
-            Serial.print(syncOutput.getBpm(STATE_RITUAL));
-            Serial.print(" PANIC=");
-            Serial.print(syncOutput.getBpm(STATE_PANIC));
-            Serial.print(" BROKEN=");
-            Serial.println(syncOutput.getBpm(STATE_BROKEN));
+            Serial.print(" | BPM=");
+            Serial.println(syncOutput.getBpm());
         } else {
-            Serial.println("Invalid sync config format. Expected: 'enabled,CALM,RITUAL,PANIC,BROKEN'");
+            Serial.println("Invalid sync config format. Expected: 'enabled,bpm'");
         }
         syncConfigStatus = SYNC_CFG_NONE;
     }
@@ -137,7 +133,7 @@ void loop() {
         Serial.print(featureExtractor.isKickHeavy() ? "YES" : "NO");
         Serial.print(" | Sync: ");
         if (syncOutput.isEnabled()) {
-            Serial.print(syncOutput.getBpm(stateEngine.getCurrentState()));
+            Serial.print(syncOutput.getBpm());
             Serial.println(" BPM");
         } else {
             Serial.println("OFF");

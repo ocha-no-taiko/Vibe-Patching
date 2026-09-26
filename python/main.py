@@ -309,6 +309,7 @@ def get_queue_state():
         "current": current_patch_info,
         "queue_interval": QUEUE_INTERVAL,
         "cooldown": COOLDOWN_SECONDS,
+        "sync": get_sync_state(),
     }
 
 
@@ -316,50 +317,115 @@ def get_queue_state():
 # SYNC クロック設定（D2 → volca modular SYNC IN）
 # ============================================================
 SYNC_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_config.json")
-SYNC_STATES = ["CALM", "RITUAL", "PANIC", "BROKEN"]
-DEFAULT_SYNC_BPM = {"CALM": 80, "RITUAL": 120, "PANIC": 170, "BROKEN": 140}
+SYNC_BPM_MIN, SYNC_BPM_MAX = 20, 300
+DEFAULT_SYNC_BPM = 120
+# MCUだけが再起動した場合（スケッチの書き直し等）にも設定が戻るよう、同じ内容でも定期的に送り直す
+SYNC_RESEND_SECONDS = 30
+
+sync_lock = threading.Lock()
+sync_state = {"enabled": True, "bpm": DEFAULT_SYNC_BPM}
+sync_wakeup = threading.Event()
 
 
-def load_sync_params():
-    """sync_config.json を読み、MCUの set_sync_config 用の文字列にする。
-    読めない値は初期値で補う（範囲 20〜300 への丸めはMCU側でも行う）。"""
+def as_int_in_range(value, lo, hi):
+    """JSONから来た値を lo〜hi の整数にする。整数として読めない・範囲外なら None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        value = int(value.strip())
+    if isinstance(value, int) and lo <= value <= hi:
+        return value
+    return None
+
+
+def reload_sync_config():
+    """sync_config.json を読み直す（手で編集された場合もアプリ再起動なしで反映するため）。"""
     try:
         with open(SYNC_CONFIG_PATH, encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception as e:
-        print(f"[Sync] Failed to load {SYNC_CONFIG_PATH}: {e}. Using defaults.")
+        print(f"[Sync] Failed to load {SYNC_CONFIG_PATH}: {e}. Keeping current settings.")
+        return
+    if not isinstance(cfg, dict):
         cfg = {}
-    bpm = cfg.get("bpm", {}) if isinstance(cfg.get("bpm"), dict) else {}
-    values = []
-    for s in SYNC_STATES:
-        try:
-            values.append(max(20, min(300, int(bpm.get(s, DEFAULT_SYNC_BPM[s])))))
-        except (TypeError, ValueError):
-            values.append(DEFAULT_SYNC_BPM[s])
-    enabled = 1 if cfg.get("enabled", True) else 0
-    return f"{enabled}," + ",".join(map(str, values))
+    try:
+        bpm = max(SYNC_BPM_MIN, min(SYNC_BPM_MAX, int(cfg.get("bpm", DEFAULT_SYNC_BPM))))
+    except (TypeError, ValueError):
+        bpm = DEFAULT_SYNC_BPM
+    with sync_lock:
+        sync_state["enabled"] = bool(cfg.get("enabled", True))
+        sync_state["bpm"] = bpm
+
+
+def get_sync_state():
+    with sync_lock:
+        return dict(sync_state)
+
+
+def save_sync_config(enabled, bpm):
+    """管理者画面からの設定を保存し、すぐにMCUへ送らせる。"""
+    with sync_lock:
+        sync_state["enabled"] = enabled
+        sync_state["bpm"] = bpm
+        tmp_path = SYNC_CONFIG_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(sync_state, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, SYNC_CONFIG_PATH)
+    sync_wakeup.set()
 
 
 def sync_config_sender():
-    """起動時と sync_config.json の更新時に、SYNC設定をMCUへ送る。
+    """SYNC設定をMCUへ送る唯一の経路。
     MCUは起動後しばらく Bridge の登録が終わらず呼び出しが失敗するので、成功するまで再送する。"""
-    sent_mtime = "unsent"
+    file_mtime = "unread"
+    last_sent = None
+    last_sent_at = 0.0
+    failing = False
     while True:
         try:
             mtime = os.path.getmtime(SYNC_CONFIG_PATH)
         except OSError:
             mtime = None
-        if mtime != sent_mtime:
-            params = load_sync_params()
+        if mtime != file_mtime:
+            file_mtime = mtime
+            if mtime is None:
+                print(f"[Sync] {SYNC_CONFIG_PATH} not found. Using current settings.")
+            else:
+                reload_sync_config()
+
+        state = get_sync_state()
+        params = f"{1 if state['enabled'] else 0},{state['bpm']}"
+        if params != last_sent or time.time() - last_sent_at >= SYNC_RESEND_SECONDS:
             try:
                 Bridge.call("set_sync_config", params)
-                sent_mtime = mtime
-                print(f"[Sync] Config sent to MCU: {params}")
+                if params != last_sent or failing:
+                    print(f"[Sync] Config sent to MCU: {'ON' if state['enabled'] else 'OFF'} {state['bpm']} BPM")
+                last_sent = params
+                last_sent_at = time.time()
+                failing = False
             except Exception as e:
-                print(f"[Sync] MCU not ready ({e}). Retrying...")
-        time.sleep(2)
+                if not failing:
+                    print(f"[Sync] MCU not ready ({e}). Retrying every 2s...")
+                failing = True
+
+        sync_wakeup.wait(2)
+        sync_wakeup.clear()
 
 threading.Thread(target=sync_config_sender, daemon=True).start()
+
+
+def admin_set_cv(values):
+    """管理者: CV1〜CV6 を直接指定して即時適用（キューをスキップ）"""
+    params = ",".join(map(str, values))
+    Bridge.call("apply_manual_patch", params)
+    current_patch_info["prompt"] = "Direct CV (admin)"
+    current_patch_info["params"] = params
+    current_patch_info["source"] = "admin-cv"
+    print(f"[Admin] Direct CV applied: {params}")
+    return params
 
 
 HTML_PAGE = """
@@ -426,6 +492,10 @@ HTML_PAGE = """
                     <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">__CV_LABEL_4__</span><span id="val-lpg" class="text-lg font-medium">Auto</span></div>
                     <div class="bg-black/30 border border-white/5 rounded-xl p-3 flex flex-col gap-1 vt hover:bg-white/5"><span class="text-xs text-muted">__CV_LABEL_5__</span><span id="val-spaceout" class="text-lg font-medium">Auto</span></div>
                 </div>
+                <div class="bg-black/30 border border-white/5 rounded-xl px-3 py-2 flex items-center justify-between">
+                    <span class="text-xs text-muted">SYNC CLOCK</span>
+                    <span id="val-sync" class="text-sm font-medium font-mono">—</span>
+                </div>
                 <div class="flex gap-3 mt-4">
                     <button onclick="submitToQueue()" id="btn-submit" class="flex-1 bg-white text-black hover:bg-gray-200 font-medium py-2.5 px-4 rounded-xl vt shadow-[0_0_20px_rgba(255,255,255,0.1)]">Submit to Queue</button>
                     <button onclick="setAutoMode()" class="flex-1 bg-transparent border border-white/10 hover:bg-white/5 text-white font-medium py-2.5 px-4 rounded-xl vt">MIDI Auto</button>
@@ -465,6 +535,31 @@ HTML_PAGE = """
                             <button onclick="adminDeploy()" class="bg-blue-500 hover:bg-blue-600 text-white font-medium py-2.5 px-6 rounded-xl vt">Deploy</button>
                         </div>
                     </div>
+                    <div class="flex flex-col gap-2">
+                        <label class="text-xs font-semibold text-muted uppercase tracking-wider">Admin: Sync Clock (D2 &rarr; SYNC IN)</label>
+                        <div class="flex gap-3 items-center">
+                            <input type="number" id="adminBpm" min="20" max="300" step="1" class="w-28 bg-black/50 border border-white/10 rounded-xl px-4 py-2.5 text-sm focus:outline-none vt text-white" placeholder="BPM">
+                            <span class="text-sm text-muted">BPM</span>
+                            <label class="flex items-center gap-2 text-sm text-white ml-auto"><input type="checkbox" id="adminSyncOn" class="h-4 w-4 accent-blue-500">ON</label>
+                            <button onclick="adminSetSync()" class="bg-blue-500 hover:bg-blue-600 text-white font-medium py-2.5 px-6 rounded-xl vt">Apply</button>
+                        </div>
+                        <p class="text-xs text-muted">20&ndash;300 BPM. 1 pulse = 1 step (16th note). Turning OFF stops the volca sequencer while the cable is plugged in.</p>
+                    </div>
+                    <div class="flex flex-col gap-2">
+                        <label class="text-xs font-semibold text-muted uppercase tracking-wider">Admin: Direct CV (0&ndash;255, no queue)</label>
+                        <div class="grid grid-cols-3 gap-3">
+                            <label class="flex flex-col gap-1"><span class="text-xs text-muted">__CV_LABEL_0__</span><input type="number" id="adminCv0" min="0" max="255" step="1" class="bg-black/50 border border-white/10 rounded-xl px-3 py-2 text-sm focus:outline-none vt text-white"></label>
+                            <label class="flex flex-col gap-1"><span class="text-xs text-muted">__CV_LABEL_1__</span><input type="number" id="adminCv1" min="0" max="255" step="1" class="bg-black/50 border border-white/10 rounded-xl px-3 py-2 text-sm focus:outline-none vt text-white"></label>
+                            <label class="flex flex-col gap-1"><span class="text-xs text-muted">__CV_LABEL_2__</span><input type="number" id="adminCv2" min="0" max="255" step="1" class="bg-black/50 border border-white/10 rounded-xl px-3 py-2 text-sm focus:outline-none vt text-white"></label>
+                            <label class="flex flex-col gap-1"><span class="text-xs text-muted">__CV_LABEL_3__</span><input type="number" id="adminCv3" min="0" max="255" step="1" class="bg-black/50 border border-white/10 rounded-xl px-3 py-2 text-sm focus:outline-none vt text-white"></label>
+                            <label class="flex flex-col gap-1"><span class="text-xs text-muted">__CV_LABEL_4__</span><input type="number" id="adminCv4" min="0" max="255" step="1" class="bg-black/50 border border-white/10 rounded-xl px-3 py-2 text-sm focus:outline-none vt text-white"></label>
+                            <label class="flex flex-col gap-1"><span class="text-xs text-muted">__CV_LABEL_5__</span><input type="number" id="adminCv5" min="0" max="255" step="1" class="bg-black/50 border border-white/10 rounded-xl px-3 py-2 text-sm focus:outline-none vt text-white"></label>
+                        </div>
+                        <div class="flex gap-3">
+                            <button onclick="loadCurrentCv()" class="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium py-2.5 px-4 rounded-xl vt">Load Current</button>
+                            <button onclick="adminSetCv()" class="flex-1 bg-blue-500 hover:bg-blue-600 text-white font-medium py-2.5 px-4 rounded-xl vt">Apply CV</button>
+                        </div>
+                    </div>
                     <div class="flex gap-3">
                         <button onclick="adminClear()" class="flex-1 bg-red-500/20 hover:bg-red-500/30 text-red-400 font-medium py-2.5 px-4 rounded-xl vt border border-red-500/20">Clear Queue</button>
                         <button onclick="adminSkip()" class="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium py-2.5 px-4 rounded-xl vt">Skip to Next</button>
@@ -485,6 +580,8 @@ HTML_PAGE = """
 let adminToken = '';
 let cooldownEnd = 0;
 let cooldownTimer = null;
+let lastState = null;
+const CV_IDS = ['val-pitch','val-fold','val-mod','val-woggle','val-lpg','val-spaceout'];
 
 function switchTab(name) {
     ['generate','sequencer','settings'].forEach(t => {
@@ -548,24 +645,36 @@ async function refreshQueue() {
         const empty = document.getElementById('queue-empty');
         const count = document.getElementById('queue-count');
         const np = document.getElementById('now-playing');
+        lastState = data;
         count.innerText = data.queue.length + ' in queue';
+        if(data.sync) {
+            document.getElementById('val-sync').innerText = data.sync.enabled ? data.sync.bpm + ' BPM' : 'OFF';
+        }
         if(data.current && data.current.prompt) {
             np.classList.remove('hidden');
             document.getElementById('now-prompt').innerText = data.current.prompt;
             if(data.current.params) {
                 const vals = data.current.params.split(',');
-                const ids = ['val-pitch','val-fold','val-mod','val-woggle','val-lpg','val-spaceout'];
-                ids.forEach((id,i) => { const el=document.getElementById(id); if(el&&vals[i]) el.innerText=vals[i].trim(); });
+                CV_IDS.forEach((id,i) => { const el=document.getElementById(id); if(el&&vals[i]) el.innerText=vals[i].trim(); });
             }
         } else { np.classList.add('hidden'); }
-        if(data.queue.length === 0) { list.innerHTML=''; empty.classList.remove('hidden'); }
+        list.replaceChildren();
+        if(data.queue.length === 0) { empty.classList.remove('hidden'); }
         else {
             empty.classList.add('hidden');
-            list.innerHTML = data.queue.map(q =>
-                '<div class="bg-black/30 border border-white/5 rounded-lg p-3 flex items-center gap-3 vt">' +
-                '<span class="text-xs text-muted font-mono w-6">#'+q.pos+'</span>' +
-                '<span class="text-sm flex-1">'+q.prompt+'</span></div>'
-            ).join('');
+            // プロンプトは観客の入力なので、HTMLとして解釈させず文字列として表示する
+            data.queue.forEach(q => {
+                const row = document.createElement('div');
+                row.className = 'bg-black/30 border border-white/5 rounded-lg p-3 flex items-center gap-3 vt';
+                const pos = document.createElement('span');
+                pos.className = 'text-xs text-muted font-mono w-6';
+                pos.textContent = '#' + q.pos;
+                const text = document.createElement('span');
+                text.className = 'text-sm flex-1';
+                text.textContent = q.prompt;
+                row.append(pos, text);
+                list.appendChild(row);
+            });
         }
     } catch(e) {}
 }
@@ -590,6 +699,9 @@ async function loginAdmin() {
             document.getElementById('admin-status').innerText = 'Authenticated ✓';
             document.getElementById('admin-status').className = 'text-xs text-green-400 mt-1';
             document.getElementById('admin-controls').classList.remove('hidden');
+            await refreshQueue();
+            loadCurrentSync();
+            loadCurrentCv();
         } else {
             document.getElementById('admin-status').innerText = 'Error: ' + (data.error || 'Wrong password');
             document.getElementById('admin-status').className = 'text-xs text-red-400 mt-1';
@@ -627,6 +739,52 @@ async function adminSkip() {
         else setStatus(data.error || 'Queue empty', 'muted');
         refreshQueue();
     } catch(e) {}
+}
+
+// 管理者の入力欄は、ログイン時と Load Current のときだけ現在値で埋める（自動更新で入力中の値を消さないため）
+function loadCurrentSync() {
+    if(!lastState || !lastState.sync) return;
+    document.getElementById('adminBpm').value = lastState.sync.bpm;
+    document.getElementById('adminSyncOn').checked = lastState.sync.enabled;
+}
+
+function loadCurrentCv() {
+    if(!lastState || !lastState.current || !lastState.current.params) return;
+    const vals = lastState.current.params.split(',');
+    for(let i=0; i<6; i++) document.getElementById('adminCv'+i).value = (vals[i] || '').trim();
+}
+
+function readIntField(id, lo, hi) {
+    const raw = document.getElementById(id).value.trim();
+    const n = Number(raw);
+    return (raw !== '' && Number.isInteger(n) && n >= lo && n <= hi) ? n : null;
+}
+
+async function adminSetSync() {
+    const bpm = readIntField('adminBpm', 20, 300);
+    if(bpm === null) { setStatus('BPM must be an integer 20-300', 'red-400'); return; }
+    const enabled = document.getElementById('adminSyncOn').checked;
+    try {
+        const res = await fetch('/api/admin/sync', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bpm, enabled, password: adminToken}) });
+        const data = await res.json();
+        if(data.ok) { setStatus('Sync: ' + (data.sync.enabled ? data.sync.bpm + ' BPM' : 'OFF'), 'blue-400'); refreshQueue(); }
+        else setStatus(data.error, 'red-400');
+    } catch(e) { setStatus('Error: connection failed', 'red-400'); }
+}
+
+async function adminSetCv() {
+    const values = [];
+    for(let i=0; i<6; i++) {
+        const v = readIntField('adminCv'+i, 0, 255);
+        if(v === null) { setStatus('CV' + (i+1) + ' must be an integer 0-255', 'red-400'); return; }
+        values.push(v);
+    }
+    try {
+        const res = await fetch('/api/admin/cv', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({values, password: adminToken}) });
+        const data = await res.json();
+        if(data.ok) { setStatus('Direct CV: ' + data.params, 'blue-400'); refreshQueue(); }
+        else setStatus(data.error, 'red-400');
+    } catch(e) { setStatus('Error: connection failed', 'red-400'); }
 }
 
 // 自動リフレッシュ：観客がどのタブを開いていても常に最新のパラメータやキューをバックグラウンドで反映する！
@@ -768,6 +926,39 @@ class UIHandler(BaseHTTPRequestHandler):
                 prompt_queue.clear()
             print("[Admin] Queue cleared")
             self._send_json({"ok": True})
+
+        elif self.path == '/api/admin/sync':
+            if body.get('password') != ADMIN_PASSWORD:
+                self._send_json({"ok": False, "error": "Wrong password"}, 403)
+                return
+            bpm = as_int_in_range(body.get('bpm'), SYNC_BPM_MIN, SYNC_BPM_MAX)
+            if bpm is None:
+                self._send_json({"ok": False, "error": f"BPM must be an integer {SYNC_BPM_MIN}-{SYNC_BPM_MAX}"}, 400)
+                return
+            enabled = bool(body.get('enabled', True))
+            try:
+                save_sync_config(enabled, bpm)
+            except OSError as e:
+                self._send_json({"ok": False, "error": f"Failed to save: {e}"}, 500)
+                return
+            print(f"[Admin] Sync set: {'ON' if enabled else 'OFF'} {bpm} BPM")
+            self._send_json({"ok": True, "sync": get_sync_state()})
+
+        elif self.path == '/api/admin/cv':
+            if body.get('password') != ADMIN_PASSWORD:
+                self._send_json({"ok": False, "error": "Wrong password"}, 403)
+                return
+            raw = body.get('values')
+            values = [as_int_in_range(v, 0, 255) for v in raw] if isinstance(raw, list) and len(raw) == 6 else None
+            if values is None or None in values:
+                self._send_json({"ok": False, "error": "CV values must be 6 integers 0-255"}, 400)
+                return
+            try:
+                params = admin_set_cv(values)
+            except Exception as e:
+                self._send_json({"ok": False, "error": f"MCU error: {e}"}, 502)
+                return
+            self._send_json({"ok": True, "params": params})
 
         elif self.path == '/api/admin/skip':
             if body.get('password') != ADMIN_PASSWORD:
